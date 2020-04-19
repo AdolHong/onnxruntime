@@ -115,9 +115,9 @@ TrainingSession::TrainingSession(const SessionOptions& session_options, const En
     : InferenceSession(session_options, env) {
   // the rewriter needs to be registered for runtime rewrite of control edges
   // since model save/load would discard control edge info
-  auto rule_transformer_L1 = onnxruntime::make_unique<RuleBasedGraphTransformer>("RuleMemSwapTransformer1");
-  rule_transformer_L1->Register(onnxruntime::make_unique<AddControlEdgeForMemorySwapRewriter>());
-  RegisterGraphTransformer(std::unique_ptr<GraphTransformer>(rule_transformer_L1.release()), TransformerLevel::Level1);
+  auto rule_transformer_L3 = onnxruntime::make_unique<RuleBasedGraphTransformer>("RuleMemSwapTransformer3");
+  rule_transformer_L3->Register(onnxruntime::make_unique<AddControlEdgeForMemorySwapRewriter>());
+  RegisterGraphTransformer(std::unique_ptr<GraphTransformer>(rule_transformer_L3.release()), TransformerLevel::Level3);
 }
 
 Status TrainingSession::ConfigureForTraining(
@@ -450,12 +450,20 @@ Status TrainingSession::AddGistEncoding() {
 Status TrainingSession::AddMemorySwap(int min_topo_distance) {
   try {
     Graph& graph = model_->MainGraph();
-    auto rule_transformer_L1 = onnxruntime::make_unique<RuleBasedGraphTransformer>("RuleMemSwapTransformer1");
-    rule_transformer_L1->Register(onnxruntime::make_unique<MemorySwapRewriter>(min_topo_distance));
-    rule_transformer_L1->Register(onnxruntime::make_unique<AddControlEdgeForMemorySwapRewriter>());
+    auto rule_transformer_L3 = onnxruntime::make_unique<RuleBasedGraphTransformer>("RuleMemSwapTransformer3");
+    rule_transformer_L3->Register(onnxruntime::make_unique<MemorySwapRewriter>(min_topo_distance));
+    rule_transformer_L3->Register(onnxruntime::make_unique<AddControlEdgeForMemorySwapRewriter>());
     onnxruntime::GraphTransformerManager graph_transformation_mgr{1};
-    graph_transformation_mgr.Register(std::move(rule_transformer_L1), TransformerLevel::Level1);
-    ORT_RETURN_IF_ERROR(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level1, *session_logger_));
+    graph_transformation_mgr.Register(std::move(rule_transformer_L3), TransformerLevel::Level3);
+    ORT_RETURN_IF_ERROR(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level3, *session_logger_));
+
+    std::cout << "Topo order after memory swap:" << std::endl;
+    GraphViewer gv(graph);
+    for (auto i : gv.GetNodesInTopologicalOrder()) {
+      std::cout << gv.GetNode(i)->OpType() << ": " << gv.GetNode(i)->OutputDefs()[0]->Name() << std::endl;
+    }
+    std::cout << std::endl;
+
   } catch (const OnnxRuntimeException& exp) {
     return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Failed to add memory swap:", exp.what());
   }

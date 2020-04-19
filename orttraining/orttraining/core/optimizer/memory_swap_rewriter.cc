@@ -13,15 +13,6 @@ static bool IsBackwardNode(const Node& node) {
   return node.Description() == "Backward pass";
 }
 
-static void ComputeTopoIndices(const Graph& graph, std::unordered_map<NodeIndex, int>& topo_indices) {
-  topo_indices.clear();
-  GraphViewer graph_viewer(graph);
-  int topo_index = 0;
-  for (const auto index : graph_viewer.GetNodesInTopologicalOrder()) {
-    topo_indices.insert(std::make_pair(index, topo_index++));
-  }
-}
-
 Status MemorySwapRewriter::Apply(Graph& graph, Node& src_node, RewriteRuleEffect& rule_effect, const logging::Logger& /*logger*/) const {
   int src_node_output_idx = 0;
   for (auto output_def : src_node.OutputDefs()) {
@@ -79,7 +70,20 @@ Status MemorySwapRewriter::Apply(Graph& graph, Node& src_node, RewriteRuleEffect
   return Status::OK();
 }
 
+// we don't want to check these ops for memory swap
+static const std::unordered_set<std::string> ignored_op_types =
+    {"SwapToCPU",
+     "Shape",
+     "ConstantOfShape",
+     "Expand",
+     "Slice",
+     "Gather",
+     "Concat"};
+
 bool MemorySwapRewriter::SatisfyCondition(const Graph& graph, const Node& node, const logging::Logger& /*logger*/) const {
+  if (ignored_op_types.count(node.OpType()))
+    return false;
+
   // only check forward nodes
   if (IsBackwardNode(node))
     return false;
@@ -88,7 +92,12 @@ bool MemorySwapRewriter::SatisfyCondition(const Graph& graph, const Node& node, 
   static std::unordered_map<NodeIndex, int> topo_indices;
   if (last_graph != &graph) {
     last_graph = &graph;
-    ComputeTopoIndices(graph, topo_indices);
+    topo_indices.clear();
+    GraphViewer graph_viewer(graph);
+    int topo_index = 0;
+    for (const auto index : graph_viewer.GetNodesInTopologicalOrder()) {
+      topo_indices.insert(std::make_pair(index, topo_index++));
+    }
   }
 
   // check if the node has one output going to a backward
@@ -103,40 +112,112 @@ bool MemorySwapRewriter::SatisfyCondition(const Graph& graph, const Node& node, 
   return false;
 }
 
-bool AddControlEdgeForMemorySwapRewriter::SatisfyCondition(const Graph& /*graph*/, const Node& node, const logging::Logger& /*logger*/) const {
-  // only add control edge for forward graph
-  // backward is OK because topological sort uses reverse DFS
-  return !IsBackwardNode(node);
-}
-
 Status AddControlEdgeForMemorySwapRewriter::Apply(Graph& graph, Node& node, RewriteRuleEffect& rule_effect, const logging::Logger& /*logger*/) const {
   static const Graph* last_graph = nullptr;
-  static std::unordered_map<NodeIndex, int> topo_indices;
-  if (last_graph != &graph) {
-    last_graph = &graph;
-    ComputeTopoIndices(graph, topo_indices);
-  }
+  static std::unordered_map<NodeIndex, std::unordered_set<NodeIndex>> precedences;
 
-  // SwapToCPU in forward, need to make sure it happens as early as possible
-  int min_topo_index = INT_MAX;
-  NodeIndex peer_node_index = 0;
-  for (auto in_iter = node.InputEdgesBegin(); in_iter != node.InputEdgesEnd(); ++in_iter) {
-    const Node& src_node = in_iter->GetNode();
-    for (auto iter = src_node.OutputEdgesBegin(); iter != src_node.OutputEdgesEnd(); ++iter) {
-      const auto& peer_node = iter->GetNode();
-      if (peer_node.OpType() == "SwapToCPU" || IsBackwardNode(peer_node))
-        continue;
-
-      int topo_index = topo_indices[peer_node.Index()];
-      if (topo_index < min_topo_index) {
-        min_topo_index = topo_index;
-        peer_node_index = peer_node.Index();
+  auto update_precedences = []() {
+    GraphViewer gv(*last_graph);
+    precedences.clear();
+    for (auto i : gv.GetNodesInTopologicalOrder()) {
+      const Node* pnode = gv.GetNode(i);
+      precedences.insert(std::make_pair(i, std::unordered_set<NodeIndex>()));
+      for (auto iter = pnode->InputNodesBegin(); iter != pnode->InputNodesEnd(); ++iter) {
+        NodeIndex prev_node_idx = iter->Index();
+        precedences[i].insert(precedences[prev_node_idx].begin(), precedences[prev_node_idx].end());
+        ORT_ENFORCE(precedences[i].count(i) == 0);
       }
     }
+  };
+
+  if (last_graph != &graph) {
+    last_graph = &graph;
+    update_precedences();
   }
-  if (min_topo_index < INT_MAX) {
-    graph.AddControlEdge(node.Index(), peer_node_index);
-    rule_effect = RewriteRuleEffect::kModifiedRestOfGraph;
+
+  NodeIndex swap_node_idx = node.Index();
+  NodeIndex node_found = 0;
+  bool found = false;
+
+  // don't build control edges on these ops
+  if (IsBackwardNode(node)) {
+    // SwapToCPU in backward, need to make sure it happens as late as possible
+    std::function<bool(NodeIndex)> find_in_bw =
+        [&](NodeIndex node_to_search) {
+          std::vector<NodeIndex> prev_nodes_to_search;
+          const Node* pnode = graph.GetNode(node_to_search);
+          if (pnode == nullptr || ignored_op_types.count(pnode->OpType()) || !IsBackwardNode(*pnode))
+            return false;
+
+          for (auto iter = pnode->InputNodesBegin(); iter != pnode->InputNodesEnd(); ++iter) {
+            if (ignored_op_types.count(iter->OpType()) || !IsBackwardNode(*iter))
+              continue;
+
+            if (precedences[iter->Index()].count(swap_node_idx) == 0) {
+              node_found = iter->Index();
+              return true;
+            }
+            prev_nodes_to_search.push_back(iter->Index());
+          }
+          // recursive if not found yet
+          for (auto prev : prev_nodes_to_search) {
+            if (find_in_bw(prev))
+              return true;
+          }
+          return false;
+        };
+
+    for (auto out_iter = node.OutputEdgesBegin(); out_iter != node.OutputEdgesEnd(); ++out_iter) {
+      if (find_in_bw(out_iter->GetNode().Index())) {
+        found = true;
+        break;
+      }
+    }
+    if (found) {
+      // add new edge to enforce swap node order, and update precedences
+      graph.AddControlEdge(node_found, swap_node_idx);
+      update_precedences();
+      rule_effect = RewriteRuleEffect::kModifiedRestOfGraph;
+    }
+  } else {
+    // SwapToCPU in forward, need to make sure it happens as early as possible
+    std::function<bool(NodeIndex)> find_in_fw =
+        [&](NodeIndex node_to_search) {
+          std::vector<NodeIndex> next_nodes_to_search;
+          const Node* pnode = graph.GetNode(node_to_search);
+          if (pnode == nullptr || ignored_op_types.count(pnode->OpType()) || IsBackwardNode(*pnode))
+            return false;
+
+          for (auto iter = pnode->OutputNodesBegin(); iter != pnode->OutputNodesEnd(); ++iter) {
+            if (ignored_op_types.count(iter->OpType()) || IsBackwardNode(*iter))
+              continue;
+
+            if (precedences[swap_node_idx].count(iter->Index()) == 0) {
+              node_found = iter->Index();
+              return true;
+            }
+            next_nodes_to_search.push_back(iter->Index());
+          }
+          // recursive if not found yet
+          for (auto next : next_nodes_to_search) {
+            if (find_in_fw(next))
+              return true;
+          }
+          return false;
+        };
+
+    for (auto in_iter = node.InputEdgesBegin(); in_iter != node.InputEdgesEnd(); ++in_iter) {
+      if (find_in_fw(in_iter->GetNode().Index())) {
+        found = true;
+        break;
+      }
+    }
+    if (found) {
+      // add new edge to enforce swap node order, and update precedences
+      graph.AddControlEdge(swap_node_idx, node_found);
+      update_precedences();
+      rule_effect = RewriteRuleEffect::kModifiedRestOfGraph;
+    }
   }
   return Status::OK();
 }
