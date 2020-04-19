@@ -124,9 +124,8 @@ Status AddControlEdgeForMemorySwapRewriter::Apply(Graph& graph, Node& node, Rewr
     const Node& src_node = in_iter->GetNode();
     for (auto iter = src_node.OutputEdgesBegin(); iter != src_node.OutputEdgesEnd(); ++iter) {
       const auto& peer_node = iter->GetNode();
-      if (peer_node.Index() == node.Index()) {
+      if (peer_node.OpType() == "SwapToCPU" || IsBackwardNode(peer_node))
         continue;
-      }
 
       int topo_index = topo_indices[peer_node.Index()];
       if (topo_index < min_topo_index) {
