@@ -20,14 +20,14 @@ Status MemorySwapRewriter::Apply(Graph& graph, Node& src_node, RewriteRuleEffect
     auto& swap_out_arg = graph.GetOrCreateNodeArg(src_node_output_arg->Name() + "_memswap_out", src_node_output_arg->TypeAsProto());
     auto& swap_in_arg = graph.GetOrCreateNodeArg(src_node_output_arg->Name() + "_memswap_in", src_node_output_arg->TypeAsProto());
     auto& swap_out_node = graph.AddNode(src_node_output_arg->Name() + "_swapout",
-                                        "SwapToCPU",
+                                        "SwapToHost",
                                         "",
                                         {src_node_output_arg},
                                         {&swap_out_arg},
                                         {},
                                         kMSDomain);
     auto& swap_in_node = graph.AddNode(src_node_output_arg->Name() + "_swapin",
-                                       "SwapToCPU",
+                                       "SwapFromHost",
                                        "Backward pass",
                                        {&swap_out_arg},
                                        {&swap_in_arg},
@@ -72,7 +72,8 @@ Status MemorySwapRewriter::Apply(Graph& graph, Node& src_node, RewriteRuleEffect
 
 // we don't want to check these ops for memory swap
 static const std::unordered_set<std::string> ignored_op_types =
-    {"SwapToCPU",
+    {"SwapToHost",
+     "SwapFromHost",
      "Shape",
      "ConstantOfShape",
      "Expand",
@@ -141,7 +142,7 @@ Status AddControlEdgeForMemorySwapRewriter::Apply(Graph& graph, Node& node, Rewr
 
   // don't build control edges on these ops
   if (IsBackwardNode(node)) {
-    // SwapToCPU in backward, need to make sure it happens as late as possible
+    // SwapFromHost in backward, need to make sure it happens as late as possible
     std::function<bool(NodeIndex)> find_in_bw =
         [&](NodeIndex node_to_search) {
           std::vector<NodeIndex> prev_nodes_to_search;
@@ -180,7 +181,7 @@ Status AddControlEdgeForMemorySwapRewriter::Apply(Graph& graph, Node& node, Rewr
       rule_effect = RewriteRuleEffect::kModifiedRestOfGraph;
     }
   } else {
-    // SwapToCPU in forward, need to make sure it happens as early as possible
+    // SwapToHost in forward, need to make sure it happens as early as possible
     std::function<bool(NodeIndex)> find_in_fw =
         [&](NodeIndex node_to_search) {
           std::vector<NodeIndex> next_nodes_to_search;

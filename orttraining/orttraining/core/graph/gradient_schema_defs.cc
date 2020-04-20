@@ -1664,11 +1664,34 @@ Return true if all elements are true and false otherwise.
         }
       });
 
-  ONNX_CONTRIB_OPERATOR_SCHEMA(SwapToCPU)
+  ONNX_CONTRIB_OPERATOR_SCHEMA(SwapToHost)
       .SetDomain(kMSDomain)
       .SinceVersion(1)
       .SetSupportLevel(OpSchema::SupportType::EXPERIMENTAL)
-      .SetDoc("Swap tensor from GPU to CPU.")
+      .SetDoc("Swap tensor from device memory to host memory.")
+      .Input(
+          0,
+          "InputData",
+          "input data.",
+          "T")
+      .Output(
+          0,
+          "OutputData",
+          "Output data.",
+          "T")
+      .TypeConstraint(
+          "T",
+          OpSchema::all_tensor_types(),
+          "Allow inputs and outputs to be any kind of tensor.")
+      .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
+        propagateShapeAndTypeFromFirstInput(ctx);
+      });
+
+  ONNX_CONTRIB_OPERATOR_SCHEMA(SwapFromHost)
+      .SetDomain(kMSDomain)
+      .SinceVersion(1)
+      .SetSupportLevel(OpSchema::SupportType::EXPERIMENTAL)
+      .SetDoc("Swap tensor from host memory to device memory.")
       .Input(
           0,
           "InputData",
