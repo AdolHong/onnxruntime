@@ -450,11 +450,13 @@ Status TrainingSession::AddGistEncoding() {
 Status TrainingSession::AddMemorySwap(int min_topo_distance) {
   try {
     Graph& graph = model_->MainGraph();
-    auto rule_transformer_L3 = onnxruntime::make_unique<RuleBasedGraphTransformer>("RuleMemSwapTransformer3");
-    rule_transformer_L3->Register(onnxruntime::make_unique<MemorySwapRewriter>(min_topo_distance));
-    rule_transformer_L3->Register(onnxruntime::make_unique<AddControlEdgeForMemorySwapRewriter>());
+    auto rule_transformer1 = onnxruntime::make_unique<RuleBasedGraphTransformer>("RuleMemSwapTransformer");
+    rule_transformer1->Register(onnxruntime::make_unique<MemorySwapRewriter>(min_topo_distance));
+    auto rule_transformer2 = onnxruntime::make_unique<RuleBasedGraphTransformer>("RuleAddControlEdgeForMemSwapTransformer");
+    rule_transformer2->Register(onnxruntime::make_unique<AddControlEdgeForMemorySwapRewriter>());
     onnxruntime::GraphTransformerManager graph_transformation_mgr{1};
-    graph_transformation_mgr.Register(std::move(rule_transformer_L3), TransformerLevel::Level3);
+    graph_transformation_mgr.Register(std::move(rule_transformer1), TransformerLevel::Level3);
+    graph_transformation_mgr.Register(std::move(rule_transformer2), TransformerLevel::Level3);
     ORT_RETURN_IF_ERROR(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level3, *session_logger_));
 
     std::cout << "Topo order after memory swap:" << std::endl;

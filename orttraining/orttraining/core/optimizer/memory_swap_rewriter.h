@@ -42,7 +42,7 @@ class AddControlEdgeForMemorySwapRewriter : public RewriteRule {
   }
 
   std::vector<std::string> TargetOpTypes() const noexcept override {
-    return {"SwapToHost", "SwapFromHost"};
+    return {"SwapToHost"};
   }
 
  private:
